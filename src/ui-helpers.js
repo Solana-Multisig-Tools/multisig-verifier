@@ -11,6 +11,8 @@ const BIDI_REGEX = /[\u202A-\u202E\u2066-\u2069]/g;
 /**
  * Core DOM builder — hyperscript pattern.
  */
+const BOOL_ATTRS = new Set(['disabled', 'checked', 'selected', 'readonly', 'required', 'hidden', 'multiple', 'autofocus']);
+
 export function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -19,6 +21,9 @@ export function el(tag, attrs = {}, ...children) {
       e[k] = v;
     } else if (k === 'className') {
       e.className = v;
+    } else if (BOOL_ATTRS.has(k)) {
+      if (v) e.setAttribute(k, '');
+      // false → don't set the attribute at all
     } else {
       e.setAttribute(k, v);
     }

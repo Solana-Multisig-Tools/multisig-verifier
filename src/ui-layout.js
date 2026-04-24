@@ -495,7 +495,7 @@ function renderProposalDetail(state, proposalActions, handlers) {
 export function renderLayout({ state, walletManager, proposalActions, onConnect, onDisconnect, onSettings, onRefresh, onLoadMore, onExpandProposal, onApprove, onReject }) {
   const container = document.createDocumentFragment();
 
-  // Header
+  // Header (sticky)
   const header = el('div', { className: 'header' });
   const headerLeft = el('div', { className: 'header-left' });
   const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -505,13 +505,29 @@ export function renderLayout({ state, walletManager, proposalActions, onConnect,
     alt: 'Squads',
   }));
   headerLeft.appendChild(el('span', { className: 'logo-text' }, 'Verifier'));
+
+  // Inline stats in header when multisig is loaded
+  if (state.multisig) {
+    const headerStats = el('div', { className: 'header-stats' });
+    headerStats.appendChild(el('span', { className: 'header-stat' },
+      el('span', { className: 'header-stat-label' }, 'Threshold'),
+      el('span', { className: 'header-stat-value' }, `${state.multisig.threshold}/${state.multisig.members.length}`),
+    ));
+    headerStats.appendChild(el('span', { className: 'header-stat-sep' }));
+    headerStats.appendChild(el('span', { className: 'header-stat' },
+      el('span', { className: 'header-stat-label' }, 'Txns'),
+      el('span', { className: 'header-stat-value' }, String(state.multisig.transactionIndex)),
+    ));
+    headerLeft.appendChild(headerStats);
+  }
+
   header.appendChild(headerLeft);
 
   const headerRight = el('div', { className: 'header-right' });
 
   if (state.walletAccount) {
     const walletInfo = walletManager.getWalletInfo();
-    const walletBtn = el('button', { className: 'btn btn-sm', onclick: onDisconnect });
+    const walletBtn = el('button', { className: 'btn btn-sm btn-wallet', onclick: onDisconnect });
     if (walletInfo?.icon) {
       walletBtn.appendChild(el('img', { src: walletInfo.icon, width: '16', height: '16', className: 'wallet-icon' }));
     }
@@ -527,20 +543,6 @@ export function renderLayout({ state, walletManager, proposalActions, onConnect,
   headerRight.appendChild(el('button', { className: 'btn btn-ghost btn-sm', onclick: onSettings }, '\u2699'));
   header.appendChild(headerRight);
   container.appendChild(header);
-
-  // Meta bar (above address bar, hidden until multisig loads)
-  const meta = el('div', { className: 'address-bar-meta' + (state.multisig ? '' : ' hidden') });
-  if (state.multisig) {
-    meta.appendChild(el('div', {},
-      el('span', { className: 'meta-label' }, 'Threshold'),
-      el('span', { className: 'meta-value' }, `${state.multisig.threshold}/${state.multisig.members.length}`),
-    ));
-    meta.appendChild(el('div', {},
-      el('span', { className: 'meta-label' }, 'Transactions'),
-      el('span', { className: 'meta-value' }, String(state.multisig.transactionIndex)),
-    ));
-  }
-  container.appendChild(meta);
 
   // Address bar (always rendered)
   {
