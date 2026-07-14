@@ -376,6 +376,22 @@ function readAddressTableLookup(reader) {
   return { accountKey, writableIndexes: Array.from(writableIndexes), readonlyIndexes: Array.from(readonlyIndexes) };
 }
 
+/**
+ * Order ALT keys as Solana MessageV0 does: all writable across every table, then
+ * all readonly. Missing/out-of-range entries become '?' to keep indices aligned.
+ */
+export function resolveLookupKeys(addressTableLookups, tableKeysPerLookup) {
+  const writable = [];
+  const readonly = [];
+  addressTableLookups.forEach((lookup, i) => {
+    const keys = tableKeysPerLookup[i];
+    const pick = (idx) => (keys && idx < keys.length ? keys[idx] : '?');
+    lookup.writableIndexes.forEach((idx) => writable.push(pick(idx)));
+    lookup.readonlyIndexes.forEach((idx) => readonly.push(pick(idx)));
+  });
+  return { writable, readonly };
+}
+
 function readTransactionMessage(reader) {
   const numSigners = reader.readU8();
   const numWritableSigners = reader.readU8();

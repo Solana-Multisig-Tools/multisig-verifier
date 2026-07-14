@@ -52,7 +52,7 @@ if (!globalThis.TextEncoder) {
   globalThis.TextDecoder = TextDecoder;
 }
 
-const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex } = await import('../src/squads.js');
+const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys } = await import('../src/squads.js');
 const { isOnCurve, findProgramAddress, sha256 } = await import('../src/crypto.js');
 const { encodeCompactU16, serializeTransactionMessage, buildUnsignedTransaction, AccountRole, concat } = await import('../src/transaction.js');
 
@@ -303,6 +303,54 @@ console.log('\n=== SHA-256 ===');
   const expected = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
   const actual = Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('');
   assertEq(actual, expected, 'SHA-256 of "test" matches known hash');
+}
+
+// ═══════════════════════════════════════════
+console.log('\n=== ALT Lookup Key Ordering ===');
+
+{
+  // Two tables, each contributing one writable + one readonly key. Solana MessageV0
+  // groups all writable across tables first, then all readonly.
+  const lookups = [
+    { writableIndexes: [0], readonlyIndexes: [1] },
+    { writableIndexes: [2], readonlyIndexes: [3] },
+  ];
+  const tableKeys = [
+    ['A_w', 'A_r', 'A_x', 'A_y'],
+    ['B_p', 'B_q', 'B_w', 'B_r'],
+  ];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+
+  assertEq(writable, ['A_w', 'B_w'], 'writable = all writable across tables, in table order');
+  assertEq(readonly, ['A_r', 'B_r'], 'readonly = all readonly across tables, in table order');
+  // The full loaded region matches the program's get_account_by_index order...
+  assertEq([...writable, ...readonly], ['A_w', 'B_w', 'A_r', 'B_r'], 'loaded order matches Solana MessageV0');
+  // ...and is NOT the old per-table interleaving that caused the spoof.
+  assert(
+    JSON.stringify([...writable, ...readonly]) !== JSON.stringify(['A_w', 'A_r', 'B_w', 'B_r']),
+    'loaded order is not the buggy per-table interleaving',
+  );
+}
+
+{
+  // Single table is unaffected by the grouping change.
+  const lookups = [{ writableIndexes: [1, 0], readonlyIndexes: [2] }];
+  const tableKeys = [['k0', 'k1', 'k2']];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+  assertEq(writable, ['k1', 'k0'], 'single-table writable preserves lookup index order');
+  assertEq(readonly, ['k2'], 'single-table readonly preserved');
+}
+
+{
+  // Unavailable table (null) yields '?' placeholders, preserving index alignment.
+  const lookups = [
+    { writableIndexes: [0], readonlyIndexes: [1] },
+    { writableIndexes: [0], readonlyIndexes: [1] },
+  ];
+  const tableKeys = [['A_w', 'A_r'], null];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+  assertEq(writable, ['A_w', '?'], 'missing table writable becomes ? placeholder');
+  assertEq(readonly, ['A_r', '?'], 'missing table readonly becomes ? placeholder');
 }
 
 // ═══════════════════════════════════════════

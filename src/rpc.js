@@ -2,7 +2,7 @@
  * RPC layer — thin wrapper over JSON-RPC via fetch.
  * Uses direct fetch() for reads (minimal deps), @solana/kit for tx construction only.
  */
-import { deserializeMultisig, deserializeProposal, deserializeTransaction, deserializeVaultBatchTransaction, getProposalPda, getTransactionPda, getBatchTransactionPda, encodeBase58 } from './squads.js';
+import { deserializeMultisig, deserializeProposal, deserializeTransaction, deserializeVaultBatchTransaction, getProposalPda, getTransactionPda, getBatchTransactionPda, encodeBase58, resolveLookupKeys } from './squads.js';
 
 const RPC_TIMEOUT = 10_000; // 10 seconds
 
@@ -21,29 +21,25 @@ async function resolveAddressTableLookups(rpcUrl, message) {
 
   if (!response?.value) return;
 
-  for (let i = 0; i < message.addressTableLookups.length; i++) {
-    const lookup = message.addressTableLookups[i];
+  // ALT layout: 56-byte header, then 32-byte pubkeys.
+  const HEADER_SIZE = 56;
+  const tableKeysPerLookup = message.addressTableLookups.map((_, i) => {
     const accountInfo = response.value[i];
-    if (!accountInfo?.data) continue;
-
+    if (!accountInfo?.data) return null;
     const altData = base64ToUint8Array(accountInfo.data[0]);
-    // ALT layout: 56 bytes header, then 32-byte pubkeys
-    const HEADER_SIZE = 56;
     const keys = [];
     for (let offset = HEADER_SIZE; offset + 32 <= altData.length; offset += 32) {
       keys.push(encodeBase58(altData.slice(offset, offset + 32)));
     }
+    return keys;
+  });
 
-    // Append writable keys first, then readonly — matching Solana's MessageV0 order
-    for (const idx of lookup.writableIndexes) {
-      if (idx < keys.length) message.accountKeys.push(keys[idx]);
-      else message.accountKeys.push('?');
-    }
-    for (const idx of lookup.readonlyIndexes) {
-      if (idx < keys.length) message.accountKeys.push(keys[idx]);
-      else message.accountKeys.push('?');
-    }
-  }
+  const staticCount = message.accountKeys.length;
+  const { writable, readonly } = resolveLookupKeys(message.addressTableLookups, tableKeysPerLookup);
+  message.accountKeys.push(...writable, ...readonly);
+  message.numStaticKeys = staticCount;
+  message.numLoadedWritable = writable.length;
+  message.numLoadedReadonly = readonly.length;
 }
 
 async function rpcCall(rpcUrl, method, params) {
