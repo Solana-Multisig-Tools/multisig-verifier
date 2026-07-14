@@ -52,7 +52,7 @@ if (!globalThis.TextEncoder) {
   globalThis.TextDecoder = TextDecoder;
 }
 
-const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys } = await import('../src/squads.js');
+const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys, deserializeConfigTransaction, CONFIG_TX_DISCRIMINATOR } = await import('../src/squads.js');
 const { isOnCurve, findProgramAddress, sha256 } = await import('../src/crypto.js');
 const { encodeCompactU16, serializeTransactionMessage, buildUnsignedTransaction, AccountRole, concat } = await import('../src/transaction.js');
 
@@ -351,6 +351,64 @@ console.log('\n=== ALT Lookup Key Ordering ===');
   const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
   assertEq(writable, ['A_w', '?'], 'missing table writable becomes ? placeholder');
   assertEq(readonly, ['A_r', '?'], 'missing table readonly becomes ? placeholder');
+}
+
+// ═══════════════════════════════════════════
+console.log('\n=== Config Action Byte Consumption ===');
+
+{
+  const u16le = (n) => [n & 0xff, (n >> 8) & 0xff];
+  const u32le = (n) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff];
+  const u64le = (n) => { const a = []; let v = BigInt(n); for (let i = 0; i < 8; i++) { a.push(Number(v & 0xffn)); v >>= 8n; } return a; };
+  const pk = (fill) => Array(32).fill(fill);
+  const build = (parts) => new Uint8Array(parts.flat());
+  const header = [Array.from(CONFIG_TX_DISCRIMINATOR), pk(1), pk(2), u64le(7), [9]]; // disc, multisig, creator, index, bump
+
+  {
+    // A complex action (AddSpendingLimit) followed by a simple one. If the complex
+    // payload is not fully consumed, action[1] would be parsed from its bytes.
+    const addSpendingLimit = [
+      [4],                          // tag
+      pk(0xAA), [3], pk(0xBB),      // create_key, vault_index, mint
+      u64le(1000), [2],             // amount, period (Month)
+      u32le(1), pk(0xCC),           // members = [one]
+      u32le(1), pk(0xDD),           // destinations = [one]
+    ];
+    const changeThreshold = [[2], u16le(0x1234)];
+    const buf = build([...header, u32le(2), ...addSpendingLimit, ...changeThreshold]);
+    const tx = deserializeConfigTransaction(buf);
+
+    assertEq(tx.actions.length, 2, 'config tx parses exactly 2 actions');
+    assertEq(tx.actions[0].name, 'AddSpendingLimit', 'action[0] is AddSpendingLimit');
+    assertEq(tx.actions[1].name, 'ChangeThreshold', 'action[1] parsed correctly after complex action (no desync)');
+    assertEq(tx.actions[1].threshold, 0x1234, 'action[1] threshold not spoofed by unconsumed bytes');
+  }
+
+  {
+    // RemoveSpendingLimit (tag 5) followed by SetTimeLock (tag 3).
+    const buf = build([...header, u32le(2), [5], pk(0xEE), [3], u32le(42)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions[0].name, 'RemoveSpendingLimit', 'tag 5 consumes its 32-byte pubkey');
+    assertEq(tx.actions[1].name, 'SetTimeLock', 'action after RemoveSpendingLimit parsed correctly');
+    assertEq(tx.actions[1].timeLock, 42, 'SetTimeLock value intact');
+  }
+
+  {
+    // SetRentCollector (tag 6) with Some(pubkey), then ChangeThreshold.
+    const buf = build([...header, u32le(2), [6], [1], pk(0x77), [2], u16le(5)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions[0].name, 'SetRentCollector', 'tag 6 recognized');
+    assertEq(tx.actions[1].name, 'ChangeThreshold', 'action after SetRentCollector Option parsed correctly');
+    assertEq(tx.actions[1].threshold, 5, 'ChangeThreshold value intact after Option<Pubkey>');
+  }
+
+  {
+    // Genuinely unknown tag: unknowable length, must fail closed (not spoof).
+    const buf = build([...header, u32le(1), [99], pk(0)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions.length, 1, 'unknown tag yields single fallback action');
+    assertEq(tx.actions[0].name, 'UnparseableActions', 'unknown ConfigAction tag fails closed');
+  }
 }
 
 // ═══════════════════════════════════════════
