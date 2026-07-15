@@ -830,6 +830,27 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 12px 24px;
 }
 
+.verification-warning {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid rgba(232, 84, 84, 0.25);
+  border-radius: var(--radius-sm);
+  background: var(--red-muted);
+  color: var(--red);
+  font-size: 13px;
+}
+
+.verification-warning ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.config-address-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 /* ─── Setup Screen ─── */
 
 .setup-wrapper {

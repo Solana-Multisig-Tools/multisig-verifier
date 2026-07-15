@@ -383,13 +383,23 @@ function readAddressTableLookup(reader) {
 export function resolveLookupKeys(addressTableLookups, tableKeysPerLookup) {
   const writable = [];
   const readonly = [];
+  const unresolved = [];
   addressTableLookups.forEach((lookup, i) => {
     const keys = tableKeysPerLookup[i];
-    const pick = (idx) => (keys && idx < keys.length ? keys[idx] : '?');
-    lookup.writableIndexes.forEach((idx) => writable.push(pick(idx)));
-    lookup.readonlyIndexes.forEach((idx) => readonly.push(pick(idx)));
+    const pick = (idx, access) => {
+      if (keys && idx < keys.length) return keys[idx];
+      unresolved.push({
+        table: lookup.accountKey,
+        tableIndex: i,
+        addressIndex: idx,
+        access,
+      });
+      return '?';
+    };
+    lookup.writableIndexes.forEach((idx) => writable.push(pick(idx, 'writable')));
+    lookup.readonlyIndexes.forEach((idx) => readonly.push(pick(idx, 'readonly')));
   });
-  return { writable, readonly };
+  return { writable, readonly, unresolved };
 }
 
 function readTransactionMessage(reader) {
@@ -474,6 +484,7 @@ function readConfigAction(reader) {
       const mint = reader.readPubkeyBase58();
       const amount = reader.readU64().toString();
       const period = reader.readU8();
+      if (period > 3) throw new Error(`Unknown spending-limit period ${period}`);
       const members = reader.readVec((r) => r.readPubkeyBase58());
       const destinations = reader.readVec((r) => r.readPubkeyBase58());
       return { name, raw: true, createKey, vaultIndex, mint, amount, period, members, destinations };
@@ -506,10 +517,12 @@ export function deserializeConfigTransaction(data) {
   const bump = reader.readU8();
 
   let actions;
+  const verificationErrors = [];
   try {
     actions = reader.readVec(readConfigAction, 32);
-  } catch {
+  } catch (err) {
     actions = [{ name: 'UnparseableActions', raw: true }];
+    verificationErrors.push('Configuration actions could not be decoded: ' + err.message);
   }
 
   return {
@@ -519,6 +532,7 @@ export function deserializeConfigTransaction(data) {
     index,
     bump,
     actions,
+    verificationErrors,
   };
 }
 
@@ -598,7 +612,16 @@ export function deserializeTransaction(data) {
   return {
     type: 'unknown',
     discriminator: toHex(disc),
+    verificationErrors: ['Unknown transaction type'],
   };
+}
+
+/**
+ * Return the reasons a transaction cannot be safely approved.
+ */
+export function getTransactionVerificationErrors(transaction) {
+  if (!transaction) return ['Transaction data is unavailable'];
+  return [...new Set(transaction.verificationErrors || [])];
 }
 
 function arrayEqual(a, b) {
