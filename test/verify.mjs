@@ -52,7 +52,7 @@ if (!globalThis.TextEncoder) {
   globalThis.TextDecoder = TextDecoder;
 }
 
-const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex } = await import('../src/squads.js');
+const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys, deserializeConfigTransaction, CONFIG_TX_DISCRIMINATOR } = await import('../src/squads.js');
 const { isOnCurve, findProgramAddress, sha256 } = await import('../src/crypto.js');
 const { encodeCompactU16, serializeTransactionMessage, buildUnsignedTransaction, AccountRole, concat } = await import('../src/transaction.js');
 
@@ -303,6 +303,112 @@ console.log('\n=== SHA-256 ===');
   const expected = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
   const actual = Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('');
   assertEq(actual, expected, 'SHA-256 of "test" matches known hash');
+}
+
+// ═══════════════════════════════════════════
+console.log('\n=== ALT Lookup Key Ordering ===');
+
+{
+  // Two tables, each contributing one writable + one readonly key. Solana MessageV0
+  // groups all writable across tables first, then all readonly.
+  const lookups = [
+    { writableIndexes: [0], readonlyIndexes: [1] },
+    { writableIndexes: [2], readonlyIndexes: [3] },
+  ];
+  const tableKeys = [
+    ['A_w', 'A_r', 'A_x', 'A_y'],
+    ['B_p', 'B_q', 'B_w', 'B_r'],
+  ];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+
+  assertEq(writable, ['A_w', 'B_w'], 'writable = all writable across tables, in table order');
+  assertEq(readonly, ['A_r', 'B_r'], 'readonly = all readonly across tables, in table order');
+  // The full loaded region matches the program's get_account_by_index order...
+  assertEq([...writable, ...readonly], ['A_w', 'B_w', 'A_r', 'B_r'], 'loaded order matches Solana MessageV0');
+  // ...and is NOT the old per-table interleaving that caused the spoof.
+  assert(
+    JSON.stringify([...writable, ...readonly]) !== JSON.stringify(['A_w', 'A_r', 'B_w', 'B_r']),
+    'loaded order is not the buggy per-table interleaving',
+  );
+}
+
+{
+  // Single table is unaffected by the grouping change.
+  const lookups = [{ writableIndexes: [1, 0], readonlyIndexes: [2] }];
+  const tableKeys = [['k0', 'k1', 'k2']];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+  assertEq(writable, ['k1', 'k0'], 'single-table writable preserves lookup index order');
+  assertEq(readonly, ['k2'], 'single-table readonly preserved');
+}
+
+{
+  // Unavailable table (null) yields '?' placeholders, preserving index alignment.
+  const lookups = [
+    { writableIndexes: [0], readonlyIndexes: [1] },
+    { writableIndexes: [0], readonlyIndexes: [1] },
+  ];
+  const tableKeys = [['A_w', 'A_r'], null];
+  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+  assertEq(writable, ['A_w', '?'], 'missing table writable becomes ? placeholder');
+  assertEq(readonly, ['A_r', '?'], 'missing table readonly becomes ? placeholder');
+}
+
+// ═══════════════════════════════════════════
+console.log('\n=== Config Action Byte Consumption ===');
+
+{
+  const u16le = (n) => [n & 0xff, (n >> 8) & 0xff];
+  const u32le = (n) => [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff];
+  const u64le = (n) => { const a = []; let v = BigInt(n); for (let i = 0; i < 8; i++) { a.push(Number(v & 0xffn)); v >>= 8n; } return a; };
+  const pk = (fill) => Array(32).fill(fill);
+  const build = (parts) => new Uint8Array(parts.flat());
+  const header = [Array.from(CONFIG_TX_DISCRIMINATOR), pk(1), pk(2), u64le(7), [9]]; // disc, multisig, creator, index, bump
+
+  {
+    // A complex action (AddSpendingLimit) followed by a simple one. If the complex
+    // payload is not fully consumed, action[1] would be parsed from its bytes.
+    const addSpendingLimit = [
+      [4],                          // tag
+      pk(0xAA), [3], pk(0xBB),      // create_key, vault_index, mint
+      u64le(1000), [2],             // amount, period (Month)
+      u32le(1), pk(0xCC),           // members = [one]
+      u32le(1), pk(0xDD),           // destinations = [one]
+    ];
+    const changeThreshold = [[2], u16le(0x1234)];
+    const buf = build([...header, u32le(2), ...addSpendingLimit, ...changeThreshold]);
+    const tx = deserializeConfigTransaction(buf);
+
+    assertEq(tx.actions.length, 2, 'config tx parses exactly 2 actions');
+    assertEq(tx.actions[0].name, 'AddSpendingLimit', 'action[0] is AddSpendingLimit');
+    assertEq(tx.actions[1].name, 'ChangeThreshold', 'action[1] parsed correctly after complex action (no desync)');
+    assertEq(tx.actions[1].threshold, 0x1234, 'action[1] threshold not spoofed by unconsumed bytes');
+  }
+
+  {
+    // RemoveSpendingLimit (tag 5) followed by SetTimeLock (tag 3).
+    const buf = build([...header, u32le(2), [5], pk(0xEE), [3], u32le(42)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions[0].name, 'RemoveSpendingLimit', 'tag 5 consumes its 32-byte pubkey');
+    assertEq(tx.actions[1].name, 'SetTimeLock', 'action after RemoveSpendingLimit parsed correctly');
+    assertEq(tx.actions[1].timeLock, 42, 'SetTimeLock value intact');
+  }
+
+  {
+    // SetRentCollector (tag 6) with Some(pubkey), then ChangeThreshold.
+    const buf = build([...header, u32le(2), [6], [1], pk(0x77), [2], u16le(5)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions[0].name, 'SetRentCollector', 'tag 6 recognized');
+    assertEq(tx.actions[1].name, 'ChangeThreshold', 'action after SetRentCollector Option parsed correctly');
+    assertEq(tx.actions[1].threshold, 5, 'ChangeThreshold value intact after Option<Pubkey>');
+  }
+
+  {
+    // Genuinely unknown tag: unknowable length, must fail closed (not spoof).
+    const buf = build([...header, u32le(1), [99], pk(0)]);
+    const tx = deserializeConfigTransaction(buf);
+    assertEq(tx.actions.length, 1, 'unknown tag yields single fallback action');
+    assertEq(tx.actions[0].name, 'UnparseableActions', 'unknown ConfigAction tag fails closed');
+  }
 }
 
 // ═══════════════════════════════════════════

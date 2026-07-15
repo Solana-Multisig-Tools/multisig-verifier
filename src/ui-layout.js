@@ -246,8 +246,12 @@ function renderInstruction(ix, txMessage, ixIndex) {
     for (let i = 0; i < ix.accountIndexes.length; i++) {
       const accIdx = ix.accountIndexes[i];
       const key = txMessage.accountKeys[accIdx] || '?';
-      const isWritable = accIdx < txMessage.numWritableSigners ||
+      const staticCount = txMessage.numStaticKeys ?? txMessage.accountKeys.length;
+      const isStaticWritable = accIdx < txMessage.numWritableSigners ||
         (accIdx >= txMessage.numSigners && accIdx < txMessage.numSigners + txMessage.numWritableNonSigners);
+      const isLoadedWritable = accIdx >= staticCount &&
+        accIdx < staticCount + (txMessage.numLoadedWritable || 0);
+      const isWritable = isStaticWritable || isLoadedWritable;
       const isSigner = accIdx < txMessage.numSigners;
 
       const row = el('tr');

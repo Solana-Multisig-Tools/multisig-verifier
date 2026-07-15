@@ -376,6 +376,22 @@ function readAddressTableLookup(reader) {
   return { accountKey, writableIndexes: Array.from(writableIndexes), readonlyIndexes: Array.from(readonlyIndexes) };
 }
 
+/**
+ * Order ALT keys as Solana MessageV0 does: all writable across every table, then
+ * all readonly. Missing/out-of-range entries become '?' to keep indices aligned.
+ */
+export function resolveLookupKeys(addressTableLookups, tableKeysPerLookup) {
+  const writable = [];
+  const readonly = [];
+  addressTableLookups.forEach((lookup, i) => {
+    const keys = tableKeysPerLookup[i];
+    const pick = (idx) => (keys && idx < keys.length ? keys[idx] : '?');
+    lookup.writableIndexes.forEach((idx) => writable.push(pick(idx)));
+    lookup.readonlyIndexes.forEach((idx) => readonly.push(pick(idx)));
+  });
+  return { writable, readonly };
+}
+
 function readTransactionMessage(reader) {
   const numSigners = reader.readU8();
   const numWritableSigners = reader.readU8();
@@ -425,9 +441,11 @@ export function deserializeVaultTransaction(data) {
 
 const CONFIG_ACTION_NAMES = [
   'AddMember', 'RemoveMember', 'ChangeThreshold', 'SetTimeLock',
-  'AddSpendingLimit', 'RemoveSpendingLimit',
+  'AddSpendingLimit', 'RemoveSpendingLimit', 'SetRentCollector',
 ];
 
+// Every branch must consume its variant's full Borsh payload: under-reading leaves
+// the cursor mid-action, letting the next vec entry parse as a spoofed fake action.
 function readConfigAction(reader) {
   const tag = reader.readU8();
   const name = CONFIG_ACTION_NAMES[tag] || `Unknown(${tag})`;
@@ -450,10 +468,28 @@ function readConfigAction(reader) {
       const timeLock = reader.readU32();
       return { name, timeLock };
     }
-    default: {
-      // For complex actions (AddSpendingLimit etc.), return raw info
-      return { name, raw: true };
+    case 4: { // AddSpendingLimit
+      const createKey = reader.readPubkeyBase58();
+      const vaultIndex = reader.readU8();
+      const mint = reader.readPubkeyBase58();
+      const amount = reader.readU64().toString();
+      const period = reader.readU8();
+      const members = reader.readVec((r) => r.readPubkeyBase58());
+      const destinations = reader.readVec((r) => r.readPubkeyBase58());
+      return { name, raw: true, createKey, vaultIndex, mint, amount, period, members, destinations };
     }
+    case 5: { // RemoveSpendingLimit
+      const spendingLimit = reader.readPubkeyBase58();
+      return { name, raw: true, spendingLimit };
+    }
+    case 6: { // SetRentCollector
+      const rentCollector = reader.readOption((r) => r.readPubkeyBase58());
+      return { name, raw: true, rentCollector };
+    }
+    default:
+      // Unknown tag: payload length is unknowable, so fail closed rather than
+      // continue parsing desynced, spoofable bytes.
+      throw new Error(`Unknown ConfigAction tag ${tag}`);
   }
 }
 
