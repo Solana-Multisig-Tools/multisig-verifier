@@ -52,7 +52,7 @@ if (!globalThis.TextEncoder) {
   globalThis.TextDecoder = TextDecoder;
 }
 
-const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys, deserializeConfigTransaction, CONFIG_TX_DISCRIMINATOR } = await import('../src/squads.js');
+const { encodeBase58, decodeBase58, isValidBase58, BorshReader, shortenAddress, toHex, resolveLookupKeys, deserializeConfigTransaction, CONFIG_TX_DISCRIMINATOR, getTransactionVerificationErrors } = await import('../src/squads.js');
 const { isOnCurve, findProgramAddress, sha256 } = await import('../src/crypto.js');
 const { encodeCompactU16, serializeTransactionMessage, buildUnsignedTransaction, AccountRole, concat } = await import('../src/transaction.js');
 
@@ -348,9 +348,13 @@ console.log('\n=== ALT Lookup Key Ordering ===');
     { writableIndexes: [0], readonlyIndexes: [1] },
   ];
   const tableKeys = [['A_w', 'A_r'], null];
-  const { writable, readonly } = resolveLookupKeys(lookups, tableKeys);
+  const { writable, readonly, unresolved } = resolveLookupKeys(lookups, tableKeys);
   assertEq(writable, ['A_w', '?'], 'missing table writable becomes ? placeholder');
   assertEq(readonly, ['A_r', '?'], 'missing table readonly becomes ? placeholder');
+  assertEq(unresolved.map(({ tableIndex, addressIndex, access }) => ({ tableIndex, addressIndex, access })), [
+    { tableIndex: 1, addressIndex: 0, access: 'writable' },
+    { tableIndex: 1, addressIndex: 1, access: 'readonly' },
+  ], 'missing ALT entries are reported as verification errors');
 }
 
 // ═══════════════════════════════════════════
@@ -382,6 +386,7 @@ console.log('\n=== Config Action Byte Consumption ===');
     assertEq(tx.actions[0].name, 'AddSpendingLimit', 'action[0] is AddSpendingLimit');
     assertEq(tx.actions[1].name, 'ChangeThreshold', 'action[1] parsed correctly after complex action (no desync)');
     assertEq(tx.actions[1].threshold, 0x1234, 'action[1] threshold not spoofed by unconsumed bytes');
+    assertEq(getTransactionVerificationErrors(tx), [], 'fully decoded config transaction is safe to approve');
   }
 
   {
@@ -408,6 +413,17 @@ console.log('\n=== Config Action Byte Consumption ===');
     const tx = deserializeConfigTransaction(buf);
     assertEq(tx.actions.length, 1, 'unknown tag yields single fallback action');
     assertEq(tx.actions[0].name, 'UnparseableActions', 'unknown ConfigAction tag fails closed');
+    assert(getTransactionVerificationErrors(tx).length > 0, 'unknown ConfigAction blocks approval');
+  }
+
+  {
+    // Period is a fixed enum (OneTime, Day, Week, Month); any other tag is invalid.
+    const invalidPeriodAction = [
+      [4], pk(0xAA), [3], pk(0xBB), u64le(1000), [4], u32le(0), u32le(0),
+    ];
+    const tx = deserializeConfigTransaction(build([...header, u32le(1), ...invalidPeriodAction]));
+    assertEq(tx.actions[0].name, 'UnparseableActions', 'invalid spending-limit period fails closed');
+    assert(getTransactionVerificationErrors(tx).length > 0, 'invalid spending-limit period blocks approval');
   }
 }
 

@@ -2,7 +2,7 @@ import '../style.css';
 import { init, getState, setState } from './state.js';
 import { createWalletManager } from './wallet.js';
 import { fetchMultisig, fetchProposalBatch, fetchTransaction, resolveMultisigAddress } from './rpc.js';
-import { deserializeMultisig, deserializeProposal, getProposalPda, getTransactionPda, PROPOSAL_DISCRIMINATOR, VAULT_TX_DISCRIMINATOR, CONFIG_TX_DISCRIMINATOR } from './squads.js';
+import { deserializeMultisig, deserializeProposal, getProposalPda, getTransactionPda, PROPOSAL_DISCRIMINATOR, VAULT_TX_DISCRIMINATOR, CONFIG_TX_DISCRIMINATOR, getTransactionVerificationErrors } from './squads.js';
 import { renderLayout, renderSetup, showToast } from './ui-layout.js';
 
 // Generation guards for async race condition protection
@@ -227,6 +227,18 @@ async function executeVote(index, approve) {
     if (!proposal || proposal.status.tag !== 1) {
       showToast('Proposal is no longer active (status: ' + (proposal?.status.name || 'unknown') + ')', 'error');
       return;
+    }
+
+    // Rejecting an unverified proposal is always allowed. Approving requires a
+    // fresh, complete decode so stale UI state cannot bypass verification.
+    if (approve) {
+      const freshTransaction = await fetchTransaction(state.rpcUrl, state.multisigAddress, index);
+      if (settingsGuard.isStale(gen)) return;
+      const verificationErrors = getTransactionVerificationErrors(freshTransaction);
+      if (verificationErrors.length > 0) {
+        showToast('Approval blocked: ' + verificationErrors.join('; '), 'error');
+        return;
+      }
     }
 
     proposalActions.set(key, 'signing');

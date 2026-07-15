@@ -2,9 +2,10 @@
  * RPC layer — thin wrapper over JSON-RPC via fetch.
  * Uses direct fetch() for reads (minimal deps), @solana/kit for tx construction only.
  */
-import { deserializeMultisig, deserializeProposal, deserializeTransaction, deserializeVaultBatchTransaction, getProposalPda, getTransactionPda, getBatchTransactionPda, encodeBase58, resolveLookupKeys } from './squads.js';
+import { deserializeMultisig, deserializeProposal, deserializeTransaction, deserializeVaultBatchTransaction, getProposalPda, getTransactionPda, getBatchTransactionPda, encodeBase58, resolveLookupKeys, PROGRAM_ID } from './squads.js';
 
 const RPC_TIMEOUT = 10_000; // 10 seconds
+const ADDRESS_LOOKUP_TABLE_PROGRAM_ID = 'AddressLookupTab1e1111111111111111111111111';
 
 /**
  * Resolve Address Lookup Table accounts and append the looked-up keys
@@ -12,6 +13,7 @@ const RPC_TIMEOUT = 10_000; // 10 seconds
  */
 async function resolveAddressTableLookups(rpcUrl, message) {
   if (!message.addressTableLookups || message.addressTableLookups.length === 0) return;
+  message.verificationErrors = [];
 
   const altAddresses = message.addressTableLookups.map(a => a.accountKey);
   const response = await rpcCall(rpcUrl, 'getMultipleAccounts', [
@@ -19,14 +21,19 @@ async function resolveAddressTableLookups(rpcUrl, message) {
     { encoding: 'base64', commitment: 'confirmed' },
   ]);
 
-  if (!response?.value) return;
+  if (!Array.isArray(response?.value)) {
+    message.verificationErrors.push('Address lookup tables could not be loaded');
+    return;
+  }
 
   // ALT layout: 56-byte header, then 32-byte pubkeys.
   const HEADER_SIZE = 56;
   const tableKeysPerLookup = message.addressTableLookups.map((_, i) => {
     const accountInfo = response.value[i];
-    if (!accountInfo?.data) return null;
-    const altData = base64ToUint8Array(accountInfo.data[0]);
+    if (!accountInfo?.data || accountInfo.owner !== ADDRESS_LOOKUP_TABLE_PROGRAM_ID) return null;
+    const encodedData = Array.isArray(accountInfo.data) ? accountInfo.data[0] : accountInfo.data;
+    if (typeof encodedData !== 'string') return null;
+    const altData = base64ToUint8Array(encodedData);
     const keys = [];
     for (let offset = HEADER_SIZE; offset + 32 <= altData.length; offset += 32) {
       keys.push(encodeBase58(altData.slice(offset, offset + 32)));
@@ -35,11 +42,14 @@ async function resolveAddressTableLookups(rpcUrl, message) {
   });
 
   const staticCount = message.accountKeys.length;
-  const { writable, readonly } = resolveLookupKeys(message.addressTableLookups, tableKeysPerLookup);
+  const { writable, readonly, unresolved } = resolveLookupKeys(message.addressTableLookups, tableKeysPerLookup);
   message.accountKeys.push(...writable, ...readonly);
   message.numStaticKeys = staticCount;
   message.numLoadedWritable = writable.length;
   message.numLoadedReadonly = readonly.length;
+  message.verificationErrors.push(...unresolved.map(({ table, addressIndex, access }) =>
+    `ALT ${table || 'unknown'} ${access} index ${addressIndex} could not be resolved`
+  ));
 }
 
 async function rpcCall(rpcUrl, method, params) {
@@ -259,13 +269,25 @@ export async function fetchTransaction(rpcUrl, multisigAddress, index) {
   if (!result?.value?.data) {
     throw new Error('Transaction account not found for index ' + index);
   }
+  if (result.value.owner !== PROGRAM_ID) {
+    throw new Error('Transaction account is not owned by the Squads v4 program');
+  }
 
   const data = base64ToUint8Array(result.value.data[0]);
   const tx = deserializeTransaction(data);
+  tx.verificationErrors = tx.verificationErrors || [];
+
+  if (tx.multisig && tx.multisig !== multisigAddress) {
+    tx.verificationErrors.push('Transaction multisig does not match the requested multisig');
+  }
+  if (tx.index !== undefined && tx.index !== BigInt(index)) {
+    tx.verificationErrors.push('Transaction index does not match the requested proposal');
+  }
 
   // Resolve Address Lookup Tables for vault transactions
   if (tx.type === 'vault' && tx.message?.addressTableLookups?.length > 0) {
     await resolveAddressTableLookups(rpcUrl, tx.message);
+    tx.verificationErrors.push(...(tx.message.verificationErrors || []));
   }
 
   // For Batch accounts, fetch inner VaultBatchTransactions to get actual instructions
@@ -287,22 +309,34 @@ export async function fetchTransaction(rpcUrl, multisigAddress, index) {
       { encoding: 'base64', commitment: 'confirmed' },
     ]);
 
-    if (innerResult?.value) {
-      for (let i = 0; i < innerResult.value.length; i++) {
+    if (Array.isArray(innerResult?.value)) {
+      for (let i = 0; i < innerPdas.length; i++) {
         const info = innerResult.value[i];
-        if (info?.data) {
-          try {
-            const innerData = base64ToUint8Array(info.data[0]);
-            const innerTx = deserializeVaultBatchTransaction(innerData);
-            if (innerTx.message?.addressTableLookups?.length > 0) {
-              await resolveAddressTableLookups(rpcUrl, innerTx.message);
-            }
-            innerTxs.push({ innerIndex: innerPdas[i].innerIndex, ...innerTx });
-          } catch {
-            // Skip unparseable inner transactions
+        const innerIndex = innerPdas[i].innerIndex;
+        if (!info?.data) {
+          tx.verificationErrors.push(`Batch transaction ${innerIndex} is unavailable`);
+          continue;
+        }
+        if (info.owner !== PROGRAM_ID) {
+          tx.verificationErrors.push(`Batch transaction ${innerIndex} is not owned by the Squads v4 program`);
+          continue;
+        }
+        try {
+          const innerData = base64ToUint8Array(info.data[0]);
+          const innerTx = deserializeVaultBatchTransaction(innerData);
+          if (innerTx.message?.addressTableLookups?.length > 0) {
+            await resolveAddressTableLookups(rpcUrl, innerTx.message);
+            tx.verificationErrors.push(...(innerTx.message.verificationErrors || []).map(
+              error => `Batch transaction ${innerIndex}: ${error}`
+            ));
           }
+          innerTxs.push({ innerIndex, ...innerTx });
+        } catch (err) {
+          tx.verificationErrors.push(`Batch transaction ${innerIndex} could not be decoded: ${err.message}`);
         }
       }
+    } else {
+      tx.verificationErrors.push('Batch transactions could not be loaded');
     }
     tx.innerTransactions = innerTxs;
   }

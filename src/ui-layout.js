@@ -3,7 +3,7 @@
  * All rendering via el() — no innerHTML.
  */
 import { el, addrEl, formatSol, formatTimestamp, statusBadge, sanitize, fragment } from './ui-helpers.js';
-import { shortenAddress, toHex, getTransactionPda, encodeBase58 } from './squads.js';
+import { shortenAddress, toHex, getTransactionPda, encodeBase58, getTransactionVerificationErrors } from './squads.js';
 import { getState, setState, getExplorerUrl, EXPLORER_ALLOWLIST } from './state.js';
 import { decodeInstruction, KNOWN_PROGRAMS } from './decode.js';
 import { isValidBase58 } from './squads.js';
@@ -287,6 +287,36 @@ function renderInstruction(ix, txMessage, ixIndex) {
   return card;
 }
 
+const SPENDING_LIMIT_PERIODS = ['One time', 'Daily', 'Weekly', 'Monthly'];
+
+function appendConfigValue(card, label, value) {
+  card.appendChild(el('div', { className: 'config-field mt-sm' },
+    el('span', { className: 'text-muted' }, label + ': '),
+    el('span', {}, String(value)),
+  ));
+}
+
+function appendConfigAddress(card, label, address) {
+  card.appendChild(el('div', { className: 'config-field mt-sm' },
+    el('span', { className: 'text-muted' }, label + ': '),
+    addrEl(address),
+  ));
+}
+
+function appendConfigAddresses(card, label, addresses, emptyLabel) {
+  const field = el('div', { className: 'config-field mt-sm' },
+    el('span', { className: 'text-muted' }, label + ': '),
+  );
+  if (addresses.length === 0) {
+    field.appendChild(el('span', {}, emptyLabel));
+  } else {
+    const list = el('div', { className: 'config-address-list' });
+    for (const address of addresses) list.appendChild(addrEl(address));
+    field.appendChild(list);
+  }
+  card.appendChild(field);
+}
+
 // ─── Proposal Detail Panel ───
 
 function renderProposalDetail(state, proposalActions, handlers) {
@@ -299,6 +329,9 @@ function renderProposalDetail(state, proposalActions, handlers) {
     panel.appendChild(el('div', { className: 'loading' }, 'Loading transaction details...'));
     return panel;
   }
+
+  const verificationErrors = getTransactionVerificationErrors(tx);
+  const canApprove = verificationErrors.length === 0;
 
   // ── Approval status card (always on top) ──
   if (proposal && multisig) {
@@ -390,9 +423,10 @@ function renderProposalDetail(state, proposalActions, handlers) {
         const actions = el('div', { className: 'actions' });
         actions.appendChild(el('button', {
           className: 'btn btn-primary',
-          disabled: isLoading,
+          disabled: isLoading || !canApprove,
+          title: canApprove ? 'Approve proposal' : 'Approval disabled until the transaction is fully verified',
           onclick: () => handlers.onApprove(proposal.index),
-        }, isLoading ? actionState + '...' : 'Approve'));
+        }, isLoading ? actionState + '...' : (canApprove ? 'Approve' : 'Approval blocked')));
 
         actions.appendChild(el('button', {
           className: 'btn btn-danger',
@@ -408,6 +442,19 @@ function renderProposalDetail(state, proposalActions, handlers) {
       } else if (!hasVotePermission && member) {
         approvalCard.appendChild(el('div', { className: 'voted-status' }, 'You do not have Vote permission'));
       }
+    }
+
+    if (verificationErrors.length > 0) {
+      const warning = el('div', { className: 'verification-warning' },
+        el('strong', {}, 'Approval disabled: transaction verification is incomplete.'),
+      );
+      if (proposal?.status.tag === 1) {
+        warning.appendChild(el('div', {}, 'Reject remains available to eligible members.'));
+      }
+      const list = el('ul');
+      for (const error of verificationErrors) list.appendChild(el('li', {}, error));
+      warning.appendChild(list);
+      approvalCard.appendChild(warning);
     }
 
     panel.appendChild(approvalCard);
@@ -443,6 +490,18 @@ function renderProposalDetail(state, proposalActions, handlers) {
       }
       if (action.key) {
         ixCard.appendChild(el('div', { className: 'mt-sm' }, el('span', {}, 'Key: '), addrEl(action.key)));
+      }
+      if (action.createKey) appendConfigAddress(ixCard, 'Create key', action.createKey);
+      if (action.vaultIndex !== undefined) appendConfigValue(ixCard, 'Vault index', action.vaultIndex);
+      if (action.mint) appendConfigAddress(ixCard, 'Mint', action.mint);
+      if (action.amount !== undefined) appendConfigValue(ixCard, 'Amount (mint base units)', action.amount);
+      if (action.period !== undefined) appendConfigValue(ixCard, 'Period', SPENDING_LIMIT_PERIODS[action.period]);
+      if (action.members) appendConfigAddresses(ixCard, 'Members', action.members, 'No members');
+      if (action.destinations) appendConfigAddresses(ixCard, 'Destinations', action.destinations, 'Any destination');
+      if (action.spendingLimit) appendConfigAddress(ixCard, 'Spending limit', action.spendingLimit);
+      if (action.rentCollector !== undefined) {
+        if (action.rentCollector === null) appendConfigValue(ixCard, 'New rent collector', 'None');
+        else appendConfigAddress(ixCard, 'New rent collector', action.rentCollector);
       }
       txCard.appendChild(ixCard);
     }
