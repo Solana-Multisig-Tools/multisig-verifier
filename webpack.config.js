@@ -16,6 +16,9 @@ module.exports = (env, argv) => {
       hashFunction: 'xxhash64',
       pathinfo: false,
     },
+    // webpack >=5.112 enables a built-in HTML pipeline by default ("auto"),
+    // which re-minifies the index.html emitted by HtmlWebpackPlugin.
+    experiments: { html: false },
     optimization: {
       moduleIds: 'deterministic',
       chunkIds: 'deterministic',
